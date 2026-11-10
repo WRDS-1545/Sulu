@@ -107,11 +107,27 @@ sulu uninstall --id "HKLM64:SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\
 | `--quiet`, `-q` | 使用 `QuietUninstallString`；MSI 使用 `/qn` |
 | `--dry-run` | 只展示命令和扫描预览，不执行卸载、不写备份 |
 | `--no-clean` | 跳过后置注册表清理 |
+| `--pause` | 卸载器退出后、注册表扫描前等待用户按回车 |
+| `--no-pause` | 不等待回车；`--yes` 模式下默认如此 |
 | `--timeout <秒>` | 等待卸载器退出，默认 1800，0 表示无限等待 |
 | `--settle <秒>` | 等待卸载项消失，默认 5 |
 | `--backup-dir <目录>` | `.reg` 备份父目录 |
 
 卸载器退出码 `0`、`3010`、`1641` 视为成功；`1602` 视为用户取消；其它非零退出码不会触发清理。
+
+有些厂商卸载器会启动后台 helper 后立刻返回，因此“退出码为 0”不代表它真的完成了。交互式运行 `sulu uninstall` 时，工具会在卸载器退出后、注册表扫描前暂停：
+
+```text
+The uninstaller process has exited, but some installers start a helper and return early.
+Wait until the vendor uninstaller has fully finished, then press Enter to scan registry leftovers.
+Press Enter to continue...
+```
+
+- 默认只在交互式终端、且未使用 `--yes` 时等待；
+- `--pause` 可强制等待，即使同时使用了 `--yes`；
+- `--no-pause` 可关闭等待；
+- `--pause` 需要交互式 stdin，重定向输入时会直接拒绝，避免破坏自动化脚本；
+- 按回车后仍会执行 `--settle` 宽限期，再开始扫描。
 
 ### 清理范围
 

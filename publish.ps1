@@ -17,7 +17,13 @@ if (Test-Path $output) {
         throw "Refusing to remove unexpected output path: $resolvedOutput"
     }
 
-    Remove-Item -LiteralPath $resolvedOutput -Recurse -Force
+    # Clear contents rather than deleting the directory itself. A terminal,
+    # preview handler, or Explorer window may hold a handle to the directory,
+    # while the published files themselves remain replaceable.
+    Get-ChildItem -LiteralPath $resolvedOutput -Force | Remove-Item -Recurse -Force
+}
+else {
+    New-Item -ItemType Directory -Force -Path $output | Out-Null
 }
 
 $selfContainedValue = if ($SelfContained) { "true" } else { "false" }

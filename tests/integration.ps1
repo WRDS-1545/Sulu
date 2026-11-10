@@ -93,6 +93,9 @@ try {
     $migrateHelp = Invoke-Cli @("help", "migrate")
     Assert-True ($migrateHelp.ExitCode -eq 0) "migrate help should exit 0"
     Assert-True ($migrateHelp.Output.Contains("--to")) "migrate help should document --to"
+    $uninstallHelp = Invoke-Cli @("help", "uninstall")
+    Assert-True ($uninstallHelp.ExitCode -eq 0) "uninstall help should exit 0"
+    Assert-True ($uninstallHelp.Output.Contains("--pause")) "uninstall help should document --pause"
 
     $listJson = Invoke-Cli @("list", "--json")
     Assert-True ($listJson.ExitCode -eq 0) "list --json should exit 0"
@@ -125,6 +128,10 @@ try {
     Assert-True ($scan.ExitCode -eq 0) "index-based scan should exit 0"
     $scanJson = $scan.Output | ConvertFrom-Json
     Assert-True ($scanJson.app.index -eq $sample.index) "scan should resolve the same index"
+    $dryRunPause = Invoke-Cli @("uninstall", "$($sample.index)", "--dry-run", "--pause", "--quiet", "--timeout", "30")
+    Assert-True ($dryRunPause.ExitCode -eq 0) "dry run with --pause should not require Enter"
+    $pauseConflict = Invoke-Cli @("uninstall", "$($sample.index)", "--dry-run", "--pause", "--no-pause")
+    Assert-True ($pauseConflict.ExitCode -eq 2) "pause and no-pause together should be a usage error"
 
     if (-not $canWriteRegistry) {
         Write-Host "Read-only checks passed. This session cannot write HKCU, so synthetic uninstall/migration tests were skipped." -ForegroundColor Yellow

@@ -55,6 +55,8 @@ internal static class CliApplication
         "quiet",
         "dry-run",
         "no-clean",
+        "pause",
+        "no-pause",
     };
 
     private static readonly HashSet<string> MigrateOptions = new(StringComparer.OrdinalIgnoreCase)
@@ -156,7 +158,7 @@ internal static class CliApplication
 
         var limit = ParseIntOption(parsed, "limit", defaultValue: 0, minimum: 0, maximum: 10_000);
         var indexed = AppIndexService.LoadIndexedCatalog();
-        PrintIndexWarnings(indexed.Warnings);
+        PrintIndexWarnings(indexed.Warnings, toStandardError: json);
         var allApps = indexed.Apps;
         var hiddenCount = allApps.Count(app => app.IsHidden);
         var indexFilter = 0;
@@ -284,6 +286,20 @@ internal static class CliApplication
         var quiet = parsed.HasFlag("quiet");
         var dryRun = parsed.HasFlag("dry-run");
         var noClean = parsed.HasFlag("no-clean");
+        var pause = parsed.HasFlag("pause");
+        var noPause = parsed.HasFlag("no-pause");
+        if (pause && noPause)
+        {
+            throw new CliException("Use either --pause or --no-pause, not both.", ExitCodes.Usage);
+        }
+
+        if (pause && !dryRun && !noClean && Console.IsInputRedirected)
+        {
+            throw new CliException(
+                "--pause requires interactive stdin. Re-run with --no-pause or in an interactive terminal.",
+                ExitCodes.Cancelled);
+        }
+
         var timeout = TimeSpan.FromSeconds(
             ParseIntOption(parsed, "timeout", defaultValue: 1800, minimum: 0, maximum: 86_400));
         var settle = TimeSpan.FromSeconds(
@@ -372,6 +388,19 @@ internal static class CliApplication
             return ExitCodes.Success;
         }
 
+        var shouldPause = pause || (!yes && !noPause);
+        if (shouldPause)
+        {
+            ConsoleUi.WaitForEnter(
+                "The uninstaller process has exited, but some installers start a helper and return early. "
+                + "Wait until the vendor uninstaller has fully finished, then press Enter to scan registry leftovers.");
+        }
+        else if (yes && !noPause)
+        {
+            ConsoleUi.Muted(
+                "Skipping the Enter wait because --yes is set. Use --pause to force the wait in automated mode.");
+        }
+
         if (settle > TimeSpan.Zero)
         {
             ConsoleUi.Muted("Waiting briefly for registry changes to settle...");
@@ -405,13 +434,14 @@ internal static class CliApplication
     private static int RunScan(ParsedCommand parsed)
     {
         CommandLine.Validate(parsed, ScanOptions, ScanFlags);
+        var json = parsed.HasFlag("json");
         var indexed = AppIndexService.LoadIndexedCatalog();
-        PrintIndexWarnings(indexed.Warnings);
+        PrintIndexWarnings(indexed.Warnings, toStandardError: json);
         var apps = indexed.Apps;
         var app = ResolveApp(parsed, apps);
         var scan = RegistryScanner.Scan(AppIdentity.From(app));
 
-        if (parsed.HasFlag("json"))
+        if (json)
         {
             WriteJson(BuildScanJson(app, scan));
             return ExitCodes.Success;
@@ -1385,11 +1415,18 @@ internal static class CliApplication
         throw new CliException(string.Join(Environment.NewLine, lines), ExitCodes.NotFoundOrAmbiguous);
     }
 
-    private static void PrintIndexWarnings(IReadOnlyList<string> warnings)
+    private static void PrintIndexWarnings(IReadOnlyList<string> warnings, bool toStandardError = false)
     {
         foreach (var warning in warnings)
         {
-            ConsoleUi.Warning(warning);
+            if (toStandardError)
+            {
+                ConsoleUi.WarningToStandardError(warning);
+            }
+            else
+            {
+                ConsoleUi.Warning(warning);
+            }
         }
     }
 
@@ -1669,6 +1706,8 @@ internal static class CliApplication
                       --quiet, -q           Use QuietUninstallString / MSI silent mode
                       --dry-run             Show the command and findings; change nothing
                       --no-clean            Uninstall only; skip registry cleanup
+                      --pause               Wait for Enter after the uninstaller exits and before the scan
+                      --no-pause            Never wait for Enter (default when --yes is used)
                       --timeout <seconds>   Uninstaller timeout (default 1800, 0 = forever)
                       --settle <seconds>    Wait for the uninstall entry to disappear (default 5)
                       --backup-dir <path>   Parent directory for .reg backups

@@ -68,6 +68,8 @@ internal static class CommandLine
         "quiet",
         "dry-run",
         "no-clean",
+        "pause",
+        "no-pause",
         "no-color",
         "include-review",
         "keep-source",

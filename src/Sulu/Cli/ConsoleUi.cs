@@ -37,6 +37,18 @@ internal static class ConsoleUi
 
     public static void Warning(string text) => WriteColor(text, YellowCode);
 
+    public static void WarningToStandardError(string text)
+    {
+        if (_color && !Console.IsErrorRedirected)
+        {
+            Console.Error.WriteLine($"{YellowCode}{text}{Reset}");
+        }
+        else
+        {
+            Console.Error.WriteLine(text);
+        }
+    }
+
     public static void Error(string text)
     {
         if (_color && !Console.IsErrorRedirected)
@@ -53,6 +65,26 @@ internal static class ConsoleUi
     {
         Console.Write($"  {key,-18}");
         Console.WriteLine(string.IsNullOrWhiteSpace(value) ? "-" : value);
+    }
+
+    public static void WaitForEnter(string message)
+    {
+        if (Console.IsInputRedirected)
+        {
+            throw new CliException(
+                "Waiting for Enter requires interactive stdin. Re-run without --pause in non-interactive mode.",
+                ExitCodes.Cancelled);
+        }
+
+        Console.WriteLine();
+        Warning(message);
+        Console.Write("Press Enter to continue... ");
+        if (Console.ReadLine() is null)
+        {
+            throw new CliException(
+                "Input closed before Enter was pressed. Registry cleanup was skipped.",
+                ExitCodes.Cancelled);
+        }
     }
 
     public static bool Confirm(string question, bool defaultNo = true)
