@@ -70,6 +70,7 @@ internal static class CommandLine
         "no-clean",
         "pause",
         "no-pause",
+        "refresh",
         "no-color",
         "include-review",
         "keep-source",

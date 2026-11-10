@@ -87,7 +87,7 @@ finally {
 try {
     New-Item -ItemType Directory -Force -Path $testDir, $dataDir, $installDir, $controlDir | Out-Null
 
-    Write-Host "`n[1/9] version, help, and list/index integrity" -ForegroundColor Cyan
+    Write-Host "`n[1/9] version, help, list/index, and refresh integrity" -ForegroundColor Cyan
     $version = Invoke-Cli @("--version")
     Assert-True ($version.ExitCode -eq 0) "version should exit 0"
     Assert-True ($version.Output -match "Sulu 1\.") "version should identify Sulu 1.x`n$($version.Output)"
@@ -109,6 +109,36 @@ try {
     Assert-True (($indexes | Where-Object { $_ -le 0 }).Count -eq 0) "every app should have a positive index"
     Assert-True (($indexes | Select-Object -Unique).Count -eq $indexes.Count) "indexes must be unique"
     Assert-True (Test-Path (Join-Path $dataDir "index.json")) "list should persist the application index"
+
+    $indexPath = Join-Path $dataDir "index.json"
+    $indexData = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+    $staleRegistryId = "HKCU:SOFTWARE\SuluRefreshTest-$runId"
+    $staleEntry = [pscustomobject]@{
+        index = 99999
+        registryId = $staleRegistryId
+        name = "Sulu stale index test"
+        publisher = $null
+        installLocation = $null
+        firstSeen = (Get-Date).ToString("o")
+        lastSeen = (Get-Date).ToString("o")
+    }
+    $indexData.apps = @($indexData.apps) + $staleEntry
+    $indexData.nextIndex = 100000
+    $indexData | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $indexPath -Encoding utf8
+
+    $refreshJson = Invoke-Cli @("list", "--refresh", "--json", "--all")
+    Assert-True ($refreshJson.ExitCode -eq 0) "list --refresh --json should exit 0"
+    $refreshed = $refreshJson.Output | ConvertFrom-Json
+    Assert-True ($refreshed.indexRefreshed -eq $true) "refresh JSON should report indexRefreshed=true"
+    Assert-True ($refreshed.staleIndexEntriesRemoved -ge 1) "refresh should report removed stale index entries"
+    Assert-True ($refreshed.indexSaved -eq $true) "refresh should save the index file"
+    Assert-True ($refreshed.indexesReassigned -eq $refreshed.count) "refresh should renumber every current application"
+    $refreshedIndexes = @($refreshed.apps | ForEach-Object { [int]$_.index } | Sort-Object)
+    Assert-True ($refreshedIndexes[0] -eq 1) "refreshed numbering should start at 1"
+    Assert-True ($refreshedIndexes[-1] -eq $refreshedIndexes.Count) "refreshed numbering should be contiguous"
+    Assert-True (($refreshedIndexes | Select-Object -Unique).Count -eq $refreshedIndexes.Count) "refreshed indexes must be unique"
+    $afterRefreshIndex = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json
+    Assert-True (@($afterRefreshIndex.apps | Where-Object { $_.registryId -eq $staleRegistryId }).Count -eq 0) "refresh should prune the stale index entry"
 
     $sample = $catalog.apps | Where-Object {
         -not [string]::IsNullOrWhiteSpace($_.installLocation) `
@@ -320,6 +350,13 @@ exit /b 0
 
     $afterPurge = (Invoke-Cli @("list", "--filter", $migrationName, "--json")).Output | ConvertFrom-Json
     Assert-True ($afterPurge.count -eq 0) "purged app should no longer be listed"
+
+    $purgeRefresh = Invoke-Cli @("list", "--refresh", "--json")
+    Assert-True ($purgeRefresh.ExitCode -eq 0) "list --refresh after purge should exit 0"
+    $purgeRefreshJson = $purgeRefresh.Output | ConvertFrom-Json
+    Assert-True ($purgeRefreshJson.staleIndexEntriesRemoved -ge 1) "refresh should remove the purged app's stale index entry"
+    $indexAfterPurge = Get-Content -LiteralPath (Join-Path $dataDir "index.json") -Raw | ConvertFrom-Json
+    Assert-True (@($indexAfterPurge.apps | Where-Object { $_.registryId -eq $migrationJson.apps[0].id }).Count -eq 0) "purged app's index entry should be pruned"
 
     Write-Host "`nAll integration checks passed." -ForegroundColor Green
 }

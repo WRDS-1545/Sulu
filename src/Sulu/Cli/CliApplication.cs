@@ -27,6 +27,7 @@ internal static class CliApplication
         "all",
         "json",
         "verbose",
+        "refresh",
     };
 
     private static readonly HashSet<string> ScanOptions = new(StringComparer.OrdinalIgnoreCase)
@@ -164,6 +165,7 @@ internal static class CliApplication
         var includeHidden = parsed.HasFlag("all");
         var json = parsed.HasFlag("json");
         var verbose = parsed.HasFlag("verbose");
+        var refresh = parsed.HasFlag("refresh");
         var sort = (parsed.GetOption("sort") ?? "name").ToLowerInvariant();
         if (sort is not ("name" or "publisher" or "date" or "size"))
         {
@@ -171,7 +173,7 @@ internal static class CliApplication
         }
 
         var limit = ParseIntOption(parsed, "limit", defaultValue: 0, minimum: 0, maximum: 10_000);
-        var indexed = AppIndexService.LoadIndexedCatalog();
+        var indexed = AppIndexService.LoadIndexedCatalog(refresh);
         PrintIndexWarnings(indexed.Warnings, toStandardError: json);
         var allApps = indexed.Apps;
         var hiddenCount = allApps.Count(app => app.IsHidden);
@@ -214,6 +216,10 @@ internal static class CliApplication
                 count = apps.Count,
                 totalMatches,
                 hiddenCount,
+                indexRefreshed = refresh,
+                staleIndexEntriesRemoved = indexed.RemovedEntries,
+                indexesReassigned = indexed.RenumberedEntries,
+                indexSaved = indexed.IndexSaved,
                 apps = apps.Select(app => new
                 {
                     index = app.Index,
@@ -237,6 +243,32 @@ internal static class CliApplication
         }
 
         ConsoleUi.Title($"Installed software ({apps.Count})");
+        if (refresh)
+        {
+            if (!indexed.IndexSaved)
+            {
+                ConsoleUi.Warning("The index refresh could not be written to disk; see the warning above.");
+            }
+            else if (indexed.RemovedEntries > 0)
+            {
+                ConsoleUi.Success(
+                    $"Index refreshed: removed {indexed.RemovedEntries} stale "
+                    + $"entr{(indexed.RemovedEntries == 1 ? "y" : "ies")}; "
+                    + $"renumbered {indexed.RenumberedEntries} application(s).");
+            }
+            else if (indexed.RenumberedEntries > 0)
+            {
+                ConsoleUi.Success(
+                    $"Index refreshed: renumbered {indexed.RenumberedEntries} application(s).");
+            }
+            else
+            {
+                ConsoleUi.Muted("Index refreshed; no installed applications were found.");
+            }
+
+            ConsoleUi.Muted($"Index file: {SuluPaths.IndexFile}");
+        }
+
         if (apps.Count == 0)
         {
             ConsoleUi.Muted("No installed software matched.");
@@ -1771,13 +1803,20 @@ internal static class CliApplication
                       --limit <n>           Show at most n results
                       --all                 Include hidden system components and updates
                       --verbose             Print full names and registry IDs, one app per block
+                      --refresh             Rebuild index.json: prune stale entries and renumber
                       --json                Machine-readable JSON output
+
+                    --refresh re-enumerates installed software, removes indexes for
+                    registry keys that no longer exist, and assigns contiguous numbers
+                    from 1 to current apps. Visible apps are numbered first, followed by
+                    hidden system/update entries. Stored indexes change after a refresh.
 
                     Examples:
                       sulu list
                       sulu list --filter chrome
                       sulu list --all --verbose
                       sulu list --filter 12
+                      sulu list --refresh
                     """);
                 return;
 

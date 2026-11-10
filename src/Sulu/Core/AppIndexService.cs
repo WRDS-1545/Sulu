@@ -7,7 +7,10 @@ namespace Sulu.Core;
 
 internal sealed record IndexedCatalog(
     IReadOnlyList<InstalledApp> Apps,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    int RemovedEntries = 0,
+    bool IndexSaved = true,
+    int RenumberedEntries = 0);
 
 internal sealed class AppIndexEntry
 {
@@ -37,9 +40,10 @@ internal sealed class AppIndexDocument
 
 /// <summary>
 /// Assigns a persistent, human-sized number to every uninstall registry entry.
-/// The registry key path is the identity; changing sort order or installing another
-/// application never renumbers existing entries. The file is intentionally kept
-/// outside the registry so listing remains read-only from the registry's point of view.
+/// Normal listing never renumbers existing entries. An explicit refresh rebuilds
+/// the file from the current catalog, pruning stale entries and assigning
+/// contiguous numbers (visible apps first). The file is intentionally kept outside
+/// the registry so listing remains read-only from the registry's point of view.
 /// </summary>
 internal static class AppIndexService
 {
@@ -52,13 +56,15 @@ internal static class AppIndexService
 
     private static readonly object SyncRoot = new();
 
-    public static IndexedCatalog LoadIndexedCatalog()
+    public static IndexedCatalog LoadIndexedCatalog(bool refresh = false)
     {
         var apps = RegistryCatalog.LoadAll();
-        return AttachIndexes(apps);
+        return AttachIndexes(apps, removeStaleEntries: refresh);
     }
 
-    public static IndexedCatalog AttachIndexes(IReadOnlyList<InstalledApp> apps)
+    public static IndexedCatalog AttachIndexes(
+        IReadOnlyList<InstalledApp> apps,
+        bool removeStaleEntries = false)
     {
         lock (SyncRoot)
         {
@@ -66,6 +72,11 @@ internal static class AppIndexService
             var document = LoadDocument(warnings);
             var originalJson = JsonSerializer.Serialize(document, JsonOptions);
             var now = DateTimeOffset.Now;
+
+            if (removeStaleEntries)
+            {
+                return RebuildIndexes(apps, document, now, warnings);
+            }
 
             var entriesById = new Dictionary<string, AppIndexEntry>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in document.Apps)
@@ -110,13 +121,84 @@ internal static class AppIndexService
                 .ToList();
 
             var updatedJson = JsonSerializer.Serialize(document, JsonOptions);
+            var indexSaved = true;
             if (!string.Equals(originalJson, updatedJson, StringComparison.Ordinal))
             {
-                TrySaveDocument(document, warnings);
+                indexSaved = TrySaveDocument(document, warnings);
             }
 
-            return new IndexedCatalog(indexedApps, warnings);
+            return new IndexedCatalog(indexedApps, warnings, IndexSaved: indexSaved);
         }
+    }
+
+    private static IndexedCatalog RebuildIndexes(
+        IReadOnlyList<InstalledApp> apps,
+        AppIndexDocument document,
+        DateTimeOffset now,
+        List<string> warnings)
+    {
+        var currentIds = apps
+            .Select(app => app.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var oldEntriesById = new Dictionary<string, AppIndexEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in document.Apps)
+        {
+            if (!string.IsNullOrWhiteSpace(entry.RegistryId)
+                && !oldEntriesById.ContainsKey(entry.RegistryId))
+            {
+                oldEntriesById[entry.RegistryId] = entry;
+            }
+        }
+
+        var removedEntries = document.Apps
+            .Select(entry => entry.RegistryId)
+            .Where(id => !string.IsNullOrWhiteSpace(id) && !currentIds.Contains(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+
+        // Visible applications receive contiguous numbers first; hidden system
+        // components follow. This keeps the default list free of gaps caused by
+        // stale or hidden entries after an explicit refresh.
+        var orderedApps = apps
+            .OrderBy(app => app.IsHidden)
+            .ThenBy(app => app.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(app => app.SourceLabel, StringComparer.Ordinal)
+            .ThenBy(app => app.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var newEntries = new List<AppIndexEntry>(orderedApps.Count);
+        var indexById = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var offset = 0; offset < orderedApps.Count; offset++)
+        {
+            var app = orderedApps[offset];
+            var index = offset + 1;
+            oldEntriesById.TryGetValue(app.Id, out var oldEntry);
+            newEntries.Add(new AppIndexEntry
+            {
+                Index = index,
+                RegistryId = app.Id,
+                Name = app.Name,
+                Publisher = app.Publisher,
+                InstallLocation = app.InstallLocation,
+                FirstSeen = oldEntry?.FirstSeen ?? now,
+                LastSeen = now,
+            });
+            indexById[app.Id] = index;
+        }
+
+        document.NextIndex = orderedApps.Count + 1;
+        document.Apps = newEntries;
+        var indexSaved = TrySaveDocument(document, warnings);
+        var indexedApps = apps
+            .Select(app => app with { Index = indexById[app.Id] })
+            .ToList();
+
+        return new IndexedCatalog(
+            indexedApps,
+            warnings,
+            removedEntries,
+            indexSaved,
+            RenumberedEntries: orderedApps.Count);
     }
 
     public static bool TryUpdateInstallLocation(

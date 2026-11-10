@@ -23,5 +23,5 @@ internal static class WindowsInfo
     }
 
     public static string Version =>
-        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.2.0";
+        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "1.4.0";
 }

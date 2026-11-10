@@ -8,7 +8,7 @@
     <AssemblyName>sulu</AssemblyName>
     <RootNamespace>Sulu</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.2.0</Version>
+    <Version>1.4.0</Version>
     <Description>Conservative Windows software uninstaller, persistent app index, and application path migration.</Description>
     <Authors>Sulu</Authors>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
