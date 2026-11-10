@@ -79,6 +79,19 @@ internal static class CliApplication
         "force",
     };
 
+    private static readonly HashSet<string> PurgeOptions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "id",
+        "index",
+        "backup-dir",
+    };
+
+    private static readonly HashSet<string> PurgeFlags = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "yes",
+        "dry-run",
+    };
+
     public static int Run(string[] args)
     {
         if (args.Length == 0)
@@ -122,6 +135,7 @@ internal static class CliApplication
             "list" or "ls" => RunList(parsed),
             "uninstall" or "remove" => RunUninstall(parsed),
             "scan" => RunScan(parsed),
+            "purge" or "force-delete" => RunPurge(parsed),
             "migrate" or "move" => RunMigrate(parsed),
             "help" => RunHelp(parsed),
             _ => throw new CliException(
@@ -459,6 +473,67 @@ internal static class CliApplication
         return ExitCodes.Success;
     }
 
+    private static int RunPurge(ParsedCommand parsed)
+    {
+        CommandLine.Validate(parsed, PurgeOptions, PurgeFlags);
+        var indexed = AppIndexService.LoadIndexedCatalog();
+        PrintIndexWarnings(indexed.Warnings);
+        var app = ResolveApp(parsed, indexed.Apps);
+        var yes = parsed.HasFlag("yes");
+        var dryRun = parsed.HasFlag("dry-run");
+        var backupDir = parsed.GetOption("backup-dir");
+
+        ConsoleUi.Title("Force-delete registry entries");
+        PrintApp(app);
+        ConsoleUi.Warning(
+            "This removes registry entries only. It does not run the vendor uninstaller and does not delete files.");
+
+        var sharingApps = indexed.Apps
+            .Where(candidate =>
+                !candidate.Id.Equals(app.Id, StringComparison.OrdinalIgnoreCase)
+                && PathTools.IsSamePath(candidate.InstallLocation, app.InstallLocation))
+            .Take(6)
+            .ToList();
+        if (sharingApps.Count > 0)
+        {
+            ConsoleUi.Warning(
+                "Other registered applications share the recorded install directory: "
+                + string.Join(", ", sharingApps.Select(candidate => $"{candidate.Ref} {candidate.Name}")));
+            ConsoleUi.Warning(
+                "Delete the directory manually only after checking that no other application still needs it.");
+        }
+
+        var scan = RegistryScanner.ScanForPurge(app);
+        PrintScanResult(scan);
+        if (scan.Findings.Count == 0)
+        {
+            ConsoleUi.Success("No related registry entries were found.");
+            return ExitCodes.Success;
+        }
+
+        var elevated = WindowsInfo.IsElevated;
+        if (!dryRun && scan.Findings.Any(finding => finding.RequiresElevation) && !elevated)
+        {
+            throw new CliException(
+                "These registry entries include machine-wide values. Run this command from an elevated terminal.",
+                ExitCodes.ElevationRequired);
+        }
+
+        var result = ExecuteCleanup(app, scan, yes, dryRun, backupDir, force: true);
+        if (result == ExitCodes.Success)
+        {
+            PrintManualDirectoryRemoval(
+                app.InstallLocation,
+                "Application directory",
+                dryRun
+                    ? "Dry run only; no registry entries were deleted. This is the directory command "
+                      + "a real purge would print:"
+                    : "The application directory is intentionally kept. Do not delete it if you still need the files.");
+        }
+
+        return result;
+    }
+
     private static int RunMigrate(ParsedCommand parsed)
     {
         CommandLine.Validate(parsed, MigrateOptions, MigrateFlags);
@@ -481,14 +556,12 @@ internal static class CliApplication
         var dryRun = parsed.HasFlag("dry-run");
         var yes = parsed.HasFlag("yes");
         var includeReview = parsed.HasFlag("include-review");
-        var keepSource = parsed.HasFlag("keep-source");
         var registryOnly = parsed.HasFlag("registry-only");
         var force = parsed.HasFlag("force");
-        if (keepSource && registryOnly)
+        if (parsed.HasFlag("keep-source"))
         {
-            throw new CliException("--keep-source cannot be combined with --registry-only.", ExitCodes.Usage);
+            ConsoleUi.Muted("--keep-source is now the default for migration; the old directory is always kept.");
         }
-
         if (app.IsMsi)
         {
             throw new CliException(
@@ -588,7 +661,7 @@ internal static class CliApplication
         PrintApp(app);
         ConsoleUi.KeyValue("From", oldPath);
         ConsoleUi.KeyValue("To", newPath);
-        ConsoleUi.KeyValue("Mode", registryOnly ? "registry only" : keepSource ? "copy files, keep source" : "copy files, remove source");
+        ConsoleUi.KeyValue("Mode", registryOnly ? "registry only, keep files" : "copy files, keep source");
 
         if (!registryOnly)
         {
@@ -685,9 +758,7 @@ internal static class CliApplication
                     : $"{selected.Count} registry value(s) would be changed, then files would be copied to the new path.");
             if (!registryOnly)
             {
-                ConsoleUi.Info(keepSource
-                    ? $"The old directory would be kept: {oldPath}"
-                    : $"The old directory would be removed after a successful registry update: {oldPath}");
+                ConsoleUi.Info($"The old directory would be kept: {oldPath}");
             }
 
             ConsoleUi.Warning("No files or registry values were changed.");
@@ -699,8 +770,8 @@ internal static class CliApplication
             ConsoleUi.Warning(
                 registryOnly
                     ? $"This will rewrite {selected.Count} registry value(s). Files will not be moved."
-                    : $"This will copy files to '{newPath}', rewrite {selected.Count} registry value(s), "
-                      + (keepSource ? "and keep the old directory." : "and then remove the old directory."));
+                    : $"This will copy files to '{newPath}' and rewrite {selected.Count} registry value(s). "
+                      + "The old directory will be kept for rollback.");
             if (!ConsoleUi.Confirm("Continue?", defaultNo: true))
             {
                 ConsoleUi.Warning("Migration cancelled.");
@@ -817,36 +888,11 @@ internal static class CliApplication
 
         ConsoleUi.Success($"Registry updated: {apply.AppliedCount} value(s) changed.");
 
-        if (!registryOnly && !keepSource)
-        {
-            ConsoleUi.Section("Remove old directory");
-            var removal = FileMigrationService.RemoveApplicationDirectory(oldPath);
-            if (!removal.Removed)
-            {
-                ConsoleUi.Warning(
-                    $"The new copy and registry are in place, but the old directory could not be removed: {removal.Error}");
-                ConsoleUi.Muted($"Remove it manually when you are satisfied: {oldPath}");
-            }
-            else
-            {
-                planFile.Plan.SourceDeleted = true;
-                planFile.Plan.QuarantinePath = removal.QuarantinePath;
-                ConsoleUi.Success("Old directory removed.");
-                if (!string.IsNullOrWhiteSpace(removal.QuarantinePath))
-                {
-                    ConsoleUi.Warning(
-                        $"The old tree was moved aside but could not be fully deleted: {removal.QuarantinePath}");
-                    ConsoleUi.Muted(
-                        "The application no longer uses that tree; remove it manually when you are satisfied.");
-                }
-            }
-
-            TrySavePlan(planFile.Plan, planFile.PlanPath);
-        }
-        else if (keepSource)
-        {
-            ConsoleUi.Muted($"The old directory was kept: {oldPath}");
-        }
+        PrintManualDirectoryRemoval(
+            oldPath,
+            "Old application directory",
+            "The old application directory is intentionally kept for rollback. After verifying that "
+            + "the application starts and works from the new location, delete the old directory manually:");
 
         AppIndexService.TryUpdateInstallLocation(app.Id, newPath, out var indexWarning);
         if (!string.IsNullOrWhiteSpace(indexWarning))
@@ -1038,6 +1084,7 @@ internal static class CliApplication
 
         ConsoleUi.Success($"Registry restored: {restore.AppliedCount} value(s) changed.");
 
+        var migratedCopyRemoved = false;
         if (copiedBack && !keepSource)
         {
             var deletion = FileMigrationService.DeleteDirectory(newPath);
@@ -1048,6 +1095,7 @@ internal static class CliApplication
             }
             else
             {
+                migratedCopyRemoved = true;
                 ConsoleUi.Success("The migrated copy was removed.");
             }
 
@@ -1061,6 +1109,15 @@ internal static class CliApplication
                         $"The old quarantine copy could not be removed: {quarantineDeletion.Error}");
                 }
             }
+        }
+
+        if (!registryOnly && !keepSource && !migratedCopyRemoved)
+        {
+            PrintManualDirectoryRemoval(
+                newPath,
+                "Migrated application directory",
+                "The registry now points to the restored old location. The migrated copy is no longer "
+                + "referenced; after verifying the restore, delete it manually:");
         }
 
         AppIndexService.TryUpdateInstallLocation(plan.AppRegistryId, oldPath, out var indexWarning);
@@ -1171,6 +1228,34 @@ internal static class CliApplication
             && candidateLeaf.StartsWith($".{oldLeaf}.sulu-old-", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static void PrintManualDirectoryRemoval(string? path, string label, string warning)
+    {
+        var normalized = PathTools.NormalizePath(path);
+        if (normalized is null)
+        {
+            return;
+        }
+
+        if (!PathTools.IsSafeAppRoot(normalized))
+        {
+            ConsoleUi.Warning(
+                $"The recorded {label.ToLowerInvariant()} is a broad shared directory, "
+                + "so no directory-removal command was generated.");
+            return;
+        }
+
+        if (!Directory.Exists(normalized))
+        {
+            return;
+        }
+
+        var quoted = normalized.Replace("'", "''", StringComparison.Ordinal);
+        ConsoleUi.Section("Manual directory cleanup");
+        ConsoleUi.Warning(warning);
+        ConsoleUi.Info($"  Remove-Item -LiteralPath '{quoted}' -Recurse -Force");
+        ConsoleUi.Muted("This permanently deletes the directory and everything inside it. Run it only when appropriate.");
+    }
+
     private static void TrySavePlan(MigrationPlan plan, string planPath)
     {
         try
@@ -1190,16 +1275,35 @@ internal static class CliApplication
         RegistryScanResult scan,
         bool yes,
         bool dryRun,
-        string? backupDir)
+        string? backupDir,
+        bool force = false)
     {
         var autoCandidates = scan.Findings.Where(finding => finding.AutoClean).ToList();
         if (autoCandidates.Count == 0)
         {
-            ConsoleUi.Warning("No registry entries are eligible for safe automatic cleanup.");
+            ConsoleUi.Warning(
+                force
+                    ? "No registry entries are available for forced deletion."
+                    : "No registry entries are eligible for safe automatic cleanup.");
             return ExitCodes.Success;
         }
 
         var elevated = WindowsInfo.IsElevated;
+        if (dryRun)
+        {
+            ConsoleUi.Section("Dry run");
+            ConsoleUi.Info($"{autoCandidates.Count} registry item(s) would be deleted:");
+            PrintCleanupTargets(autoCandidates);
+            if (autoCandidates.Any(finding => finding.RequiresElevation) && !elevated)
+            {
+                ConsoleUi.Warning(
+                    "Some targets are machine-wide and a real deletion will require an elevated terminal.");
+            }
+
+            ConsoleUi.Warning("No registry data was changed and no backup was created.");
+            return ExitCodes.Success;
+        }
+
         var permitted = autoCandidates
             .Where(finding => !finding.RequiresElevation || elevated)
             .ToList();
@@ -1220,24 +1324,13 @@ internal static class CliApplication
                 $"{skippedForElevation.Count} HKLM leftover(s) require an elevated terminal and will be skipped.");
         }
 
-        if (dryRun)
-        {
-            ConsoleUi.Section("Dry run");
-            ConsoleUi.Info($"{permitted.Count} registry item(s) would be deleted:");
-            PrintCleanupTargets(permitted);
-            ConsoleUi.Warning("No registry data was changed and no backup was created.");
-            if (skippedForElevation.Count > 0)
-            {
-                return ExitCodes.ElevationRequired;
-            }
-
-            return ExitCodes.Success;
-        }
-
         if (!yes)
         {
             ConsoleUi.Warning(
-                $"This will delete {permitted.Count} registry item(s) that were identified as belonging to '{app.Name}'.");
+                force
+                    ? $"This force-deletes {permitted.Count} registry item(s) for '{app.Name}'. "
+                      + "Application files are not touched."
+                    : $"This will delete {permitted.Count} registry item(s) that were identified as belonging to '{app.Name}'.");
             if (!ConsoleUi.Confirm("Continue?", defaultNo: true))
             {
                 ConsoleUi.Warning("Registry cleanup cancelled.");
@@ -1744,6 +1837,38 @@ internal static class CliApplication
                     """);
                 return;
 
+            case "purge":
+            case "force-delete":
+                Console.WriteLine(
+                    """
+                    Usage: sulu purge <index|name> [options]
+                           sulu purge --index <n> [options]
+                           sulu purge --id <id> [options]
+
+                    Force-deletes the selected application's registry footprint without
+                    running the vendor uninstaller. Only the application's own Uninstall
+                    key, App Paths entries, and Run/RunOnce values are targeted.
+
+                    This command never deletes files. After a successful purge it prints
+                    a Remove-Item command that you may run manually to delete the
+                    application directory.
+
+                    Options:
+                      --index <n>           Stable application index from 'sulu list'
+                      --id <id>             Exact registry ID from 'sulu list --verbose'
+                      --yes, -y             Do not ask for confirmation
+                      --dry-run             Show the registry targets; change nothing
+                      --backup-dir <path>   Parent directory for the .reg backup
+
+                    This is destructive: the application may still be installed and its
+                    uninstall entry will disappear. A .reg backup is created first.
+
+                    Examples:
+                      sulu purge 12 --dry-run
+                      sulu purge 12 --yes
+                    """);
+                return;
+
             case "migrate":
             case "move":
                 Console.WriteLine(
@@ -1756,8 +1881,9 @@ internal static class CliApplication
                     app's own uninstall entry, App Paths, and Run/RunOnce are selected
                     automatically. Everything else is listed for review.
 
-                    Files are copied first, the registry is updated second, and the old
-                    directory is removed only after both steps succeed. A migration
+                    Files are copied first and the registry is updated second. The old
+                    directory is always kept for rollback; after success a Remove-Item
+                    command is printed for you to delete it manually. A migration
                     record and review CSV are written before any change.
 
                     Migrate options:
@@ -1766,7 +1892,7 @@ internal static class CliApplication
                       --index <n>           Stable application index from 'sulu list'
                       --id <id>             Exact registry ID from 'sulu list --verbose'
                       --registry-only       Rewrite registry values; do not move files
-                      --keep-source         Copy files but keep the old directory
+                      --keep-source         Accepted for compatibility; the old directory is always kept now
                       --include-review      Also change review values, not just safe ones
                       --force               Allow running processes or shared roots; required with service refs
                       --dry-run             Show the plan; change nothing
@@ -1819,6 +1945,7 @@ internal static class CliApplication
               list        List installed software and its stable index
               uninstall   Run an uninstaller, then scan and clean registry leftovers
               scan        Preview registry footprint without changing anything
+              purge       Force-delete registry entries only; files are kept
               migrate     Move an application and rewrite its registry references
               help        Show general or command help
 

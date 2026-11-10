@@ -9,11 +9,6 @@ internal sealed record FileMigrationResult(
     string? Error,
     IReadOnlyList<string> Warnings);
 
-internal sealed record DirectoryRemovalResult(
-    bool Removed,
-    string? QuarantinePath,
-    string? Error);
-
 internal static class FileMigrationService
 {
     public static IReadOnlyList<string> FindRunningProcesses(string directory)
@@ -216,61 +211,6 @@ internal static class FileMigrationService
             or NotSupportedException)
         {
             return new FileMigrationResult(false, PathTools.OneLine(ex.Message), []);
-        }
-    }
-
-    /// <summary>
-    /// Removes the old application path through an atomic rename. If recursive
-    /// deletion then fails, the old path is still gone and the complete tree is
-    /// available under the returned quarantine path instead of being half-deleted.
-    /// </summary>
-    public static DirectoryRemovalResult RemoveApplicationDirectory(string directory)
-    {
-        try
-        {
-            if (!Directory.Exists(directory))
-            {
-                return new DirectoryRemovalResult(true, null, null);
-            }
-
-            var parent = Path.GetDirectoryName(directory);
-            var leaf = Path.GetFileName(directory);
-            if (string.IsNullOrWhiteSpace(parent) || string.IsNullOrWhiteSpace(leaf))
-            {
-                return new DirectoryRemovalResult(false, null, "The old directory has no usable name.");
-            }
-
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture);
-            var quarantine = Path.Combine(parent, $".{leaf}.sulu-old-{stamp}");
-            var suffix = 2;
-            while (Directory.Exists(quarantine) || File.Exists(quarantine))
-            {
-                quarantine = Path.Combine(
-                    parent,
-                    $".{leaf}.sulu-old-{stamp}-{suffix.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
-                suffix++;
-            }
-
-            Directory.Move(directory, quarantine);
-            try
-            {
-                Directory.Delete(quarantine, recursive: true);
-                return new DirectoryRemovalResult(true, null, null);
-            }
-            catch (Exception ex) when (ex is IOException
-                or UnauthorizedAccessException
-                or ArgumentException
-                or NotSupportedException)
-            {
-                return new DirectoryRemovalResult(true, quarantine, PathTools.OneLine(ex.Message));
-            }
-        }
-        catch (Exception ex) when (ex is IOException
-            or UnauthorizedAccessException
-            or ArgumentException
-            or NotSupportedException)
-        {
-            return new DirectoryRemovalResult(false, null, PathTools.OneLine(ex.Message));
         }
     }
 }

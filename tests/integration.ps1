@@ -45,6 +45,7 @@ $backupRoot = Join-Path $testDir "backups"
 $migrationSource = Join-Path $testDir "migration-source"
 $migrationTarget = Join-Path $testDir "migration-target"
 $migrationRecordRoot = Join-Path $testDir "migration-records"
+$purgeBackupRoot = Join-Path $testDir "purge-backups"
 $oldDataDir = $env:SULU_DATA_DIR
 $env:SULU_DATA_DIR = $dataDir
 
@@ -86,16 +87,19 @@ finally {
 try {
     New-Item -ItemType Directory -Force -Path $testDir, $dataDir, $installDir, $controlDir | Out-Null
 
-    Write-Host "`n[1/8] version, help, and list/index integrity" -ForegroundColor Cyan
+    Write-Host "`n[1/9] version, help, and list/index integrity" -ForegroundColor Cyan
     $version = Invoke-Cli @("--version")
     Assert-True ($version.ExitCode -eq 0) "version should exit 0"
-    Assert-True ($version.Output -match "Sulu 1\.1") "version should identify Sulu 1.1`n$($version.Output)"
+    Assert-True ($version.Output -match "Sulu 1\.") "version should identify Sulu 1.x`n$($version.Output)"
     $migrateHelp = Invoke-Cli @("help", "migrate")
     Assert-True ($migrateHelp.ExitCode -eq 0) "migrate help should exit 0"
     Assert-True ($migrateHelp.Output.Contains("--to")) "migrate help should document --to"
     $uninstallHelp = Invoke-Cli @("help", "uninstall")
     Assert-True ($uninstallHelp.ExitCode -eq 0) "uninstall help should exit 0"
     Assert-True ($uninstallHelp.Output.Contains("--pause")) "uninstall help should document --pause"
+    $purgeHelp = Invoke-Cli @("help", "purge")
+    Assert-True ($purgeHelp.ExitCode -eq 0) "purge help should exit 0"
+    Assert-True ($purgeHelp.Output.Contains("never deletes files")) "purge help should explain that files are kept"
 
     $listJson = Invoke-Cli @("list", "--json")
     Assert-True ($listJson.ExitCode -eq 0) "list --json should exit 0"
@@ -119,7 +123,7 @@ try {
         $sample = $catalog.apps | Select-Object -First 1
     }
 
-    Write-Host "[2/8] index-based uninstall/scan (read-only)" -ForegroundColor Cyan
+    Write-Host "[2/9] index-based uninstall/scan (read-only)" -ForegroundColor Cyan
     $dryRun = Invoke-Cli @("uninstall", "$($sample.index)", "--dry-run", "--quiet", "--timeout", "30")
     Assert-True ($dryRun.ExitCode -eq 0) "index-based uninstall dry run should exit 0`n$($dryRun.Output)"
     Assert-True ($dryRun.Output.Contains("Index")) "uninstall output should show the index"
@@ -167,7 +171,7 @@ exit /b 0
     Set-ItemProperty -Path $runKey -Name $runValue -Value "`"$(Join-Path $installDir 'launcher.exe')`" --background"
     Set-ItemProperty -Path $runKey -Name $controlRunValue -Value "`"$(Join-Path $controlDir 'control.exe')`""
 
-    Write-Host "[3/8] full long name and stable index" -ForegroundColor Cyan
+    Write-Host "[3/9] full long name and stable index" -ForegroundColor Cyan
     $longList = Invoke-Cli @("list", "--filter", $name, "--verbose")
     Assert-True ($longList.ExitCode -eq 0) "long-name list should exit 0"
     Assert-True ($longList.Output.Contains($name)) "--verbose must show the complete long display name"
@@ -175,7 +179,7 @@ exit /b 0
     Assert-True ($syntheticJson.count -eq 1) "exactly one synthetic app should match"
     $syntheticIndex = [int]$syntheticJson.apps[0].index
 
-    Write-Host "[4/8] scan while installed protects live settings" -ForegroundColor Cyan
+    Write-Host "[4/9] scan while installed protects live settings" -ForegroundColor Cyan
     $scan = Invoke-Cli @("scan", "$syntheticIndex", "--json")
     Assert-True ($scan.ExitCode -eq 0) "scan should exit 0"
     $scanJson = $scan.Output | ConvertFrom-Json
@@ -183,13 +187,13 @@ exit /b 0
     Assert-True ($scanJson.summary.autoClean -eq 0) "scan of an installed app must not mark live entries for cleanup"
     Assert-True ($scanJson.summary.total -ge 3) "scan should find uninstall, App Paths, and Run entries`n$($scan.Output)"
 
-    Write-Host "[5/8] uninstall --dry-run changes nothing" -ForegroundColor Cyan
+    Write-Host "[5/9] uninstall --dry-run changes nothing" -ForegroundColor Cyan
     $dryRun = Invoke-Cli @("uninstall", "$syntheticIndex", "--dry-run", "--quiet", "--timeout", "60")
     Assert-True ($dryRun.ExitCode -eq 0) "dry run should exit 0 (got $($dryRun.ExitCode))"
     Assert-True ($dryRun.Output.Contains("Dry run")) "dry-run output should say Dry run"
     Assert-True (Test-Path $uninstallKey) "dry run must not remove the uninstall entry"
 
-    Write-Host "[6/8] uninstall, scan, back up, and clean" -ForegroundColor Cyan
+    Write-Host "[6/9] uninstall, scan, back up, and clean" -ForegroundColor Cyan
     $uninstall = Invoke-Cli @(
         "uninstall", "$syntheticIndex", "--yes", "--quiet", "--timeout", "60",
         "--settle", "5", "--backup-dir", $backupRoot
@@ -206,7 +210,7 @@ exit /b 0
     Assert-True ($backupFiles.Count -eq 2) "cleanup should export two registry keys (got $($backupFiles.Count))"
     Assert-True (Test-Path (Join-Path (Split-Path $backupFiles[0].FullName -Parent) "manifest.json")) "backup manifest should exist"
 
-    Write-Host "[7/8] failed self-removal keeps live settings protected" -ForegroundColor Cyan
+    Write-Host "[7/9] failed self-removal keeps live settings protected" -ForegroundColor Cyan
     $protectedScript = Join-Path $testDir "uninstall-noop.cmd"
     @"
 @echo off
@@ -234,7 +238,7 @@ exit /b 0
     Assert-True (Test-Path $protectedAppPathKey) "live App Paths entry must be preserved when the app is still registered"
     Assert-True ($protected.Output.Contains("still registered")) "output should explain that live settings are protected"
 
-    Write-Host "[8/8] migration and rollback" -ForegroundColor Cyan
+    Write-Host "[8/9] migration and rollback" -ForegroundColor Cyan
     New-Item -Path $migrationUninstallKey -Force | Out-Null
     New-ItemProperty -Path $migrationUninstallKey -Name DisplayName -Value $migrationName -PropertyType String -Force | Out-Null
     New-ItemProperty -Path $migrationUninstallKey -Name Publisher -Value "Sulu Tests" -PropertyType String -Force | Out-Null
@@ -269,7 +273,9 @@ exit /b 0
     Assert-True ($migrate.Output.Contains("Migration completed")) "migration should report completion"
     Assert-True (Test-Path (Join-Path $migrationTarget "app.exe")) "migration should copy files to the target"
     Assert-True (Test-Path (Join-Path $migrationTarget "data\config.ini")) "migration should copy subdirectories"
-    Assert-True (-not (Test-Path $migrationSource)) "migration should remove the old directory"
+    Assert-True (Test-Path (Join-Path $migrationSource "app.exe")) "migration must keep the old directory"
+    Assert-True ($migrate.Output.Contains("Manual directory cleanup")) "migration should print manual cleanup guidance"
+    Assert-True ($migrate.Output.Contains($migrationSource)) "manual cleanup command should name the old directory"
     Assert-True ((Get-ItemPropertyValue -Path $migrationUninstallKey -Name InstallLocation) -eq $migrationTarget) "InstallLocation should be rewritten"
     Assert-True ((Get-ItemPropertyValue -Path $migrationAppPathKey -Name Path) -eq $migrationTarget) "App Paths Path should be rewritten"
     Assert-True ((Get-ItemPropertyValue -Path $runKey -Name $migrationRunValue).Contains($migrationTarget)) "Run value should be rewritten"
@@ -285,9 +291,9 @@ exit /b 0
     $restore = Invoke-Cli @("migrate", "--restore", $migrationPlan.FullName, "--yes")
     Assert-True ($restore.ExitCode -eq 0) "restore should exit 0`n$($restore.Output)"
     Assert-True ($restore.Output.Contains("Restore completed")) "restore should report completion"
-    Assert-True (Test-Path (Join-Path $migrationSource "app.exe")) "restore should copy files back"
-    Assert-True (Test-Path (Join-Path $migrationSource "data\config.ini")) "restore should copy subdirectories back"
-    Assert-True (-not (Test-Path $migrationTarget)) "restore should remove the migrated copy"
+    Assert-True (Test-Path (Join-Path $migrationSource "app.exe")) "restore should keep the original source files"
+    Assert-True (Test-Path (Join-Path $migrationTarget "app.exe")) "restore should not delete the migrated copy when the old path exists"
+    Assert-True ($restore.Output.Contains("Migrated application directory")) "restore should print manual cleanup guidance for the redundant copy"
     Assert-True ((Get-ItemPropertyValue -Path $migrationUninstallKey -Name InstallLocation) -eq $migrationSource) "restore should recover InstallLocation"
     Assert-True ((Get-ItemPropertyValue -Path $migrationAppPathKey -Name Path) -eq $migrationSource) "restore should recover App Paths Path"
     Assert-True ((Get-ItemPropertyValue -Path $runKey -Name $migrationRunValue).Contains($migrationSource)) "restore should recover the Run value"
@@ -295,6 +301,25 @@ exit /b 0
 
     $restoredPlan = Get-Content -LiteralPath $migrationPlan.FullName -Raw | ConvertFrom-Json
     Assert-True ($restoredPlan.restored -eq $true) "rollback record should be marked as restored"
+
+    Write-Host "[9/9] force-delete registry entries only" -ForegroundColor Cyan
+    $purge = Invoke-Cli @(
+        "purge", "$migrationIndex", "--yes", "--backup-dir", $purgeBackupRoot
+    )
+    Assert-True ($purge.ExitCode -eq 0) "purge should exit 0`n$($purge.Output)"
+    Assert-True ($purge.Output.Contains("Force-delete registry entries")) "purge should identify itself clearly"
+    Assert-True ($purge.Output.Contains("Manual directory cleanup")) "purge should print manual directory cleanup guidance"
+    Assert-True ($purge.Output.Contains($migrationSource)) "purge cleanup command should name the install directory"
+    Assert-True (Test-Path (Join-Path $migrationSource "app.exe")) "purge must not delete application files"
+    Assert-True (-not (Test-Path $migrationUninstallKey)) "purge should delete the exact uninstall entry"
+    Assert-True (-not (Test-Path $migrationAppPathKey)) "purge should delete the related App Paths key"
+    Assert-True ($null -eq (Get-ItemPropertyValue -Path $runKey -Name $migrationRunValue -ErrorAction SilentlyContinue)) "purge should delete the related Run value"
+    Assert-True (Test-Path $migrationSettingsKey) "purge must not delete unrelated vendor settings"
+    $purgeBackups = @(Get-ChildItem -Path $purgeBackupRoot -Recurse -Filter "*.reg" -ErrorAction Stop)
+    Assert-True ($purgeBackups.Count -ge 3) "purge should back up each registry key (got $($purgeBackups.Count))"
+
+    $afterPurge = (Invoke-Cli @("list", "--filter", $migrationName, "--json")).Output | ConvertFrom-Json
+    Assert-True ($afterPurge.count -eq 0) "purged app should no longer be listed"
 
     Write-Host "`nAll integration checks passed." -ForegroundColor Green
 }

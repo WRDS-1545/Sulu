@@ -111,6 +111,70 @@ internal sealed class RegistryScanner
             appStillInstalled);
     }
 
+    /// <summary>
+    /// Builds the exact target list for a forced registry-only purge. Only the
+    /// application's own uninstall entry, App Paths entries, and Run/RunOnce values
+    /// tied to its install location are included. Other uninstall entries with the
+    /// same name and vendor/product keys are deliberately not scanned.
+    /// </summary>
+    public static RegistryScanResult ScanForPurge(InstalledApp app)
+    {
+        var identity = AppIdentity.From(app);
+        var findings = new List<RegistryFinding>();
+        var warnings = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var safeInstallRoot = PathTools.IsSafeAppRoot(identity.InstallLocation);
+
+        if (RegistryCatalog.Exists(app.Location))
+        {
+            findings.Add(new RegistryFinding
+            {
+                Id = app.Id,
+                Kind = FindingKind.UninstallEntry,
+                Location = app.Location,
+                Summary = app.Name,
+                Detail = $"Name={app.Name}; Version={app.DisplayVersion}; "
+                    + $"Publisher={app.DisplayPublisher}; InstallLocation={app.DisplayInstallLocation}",
+                Risk = FindingRisk.High,
+                AutoClean = true,
+                Reason = "Forced purge requested for the application's own uninstall entry.",
+            });
+            seen.Add(app.Id);
+        }
+
+        if (string.IsNullOrWhiteSpace(identity.InstallLocation))
+        {
+            warnings.Add(
+                "This app has no InstallLocation. Only its uninstall entry can be removed; "
+                + "App Paths and startup entries cannot be matched safely.");
+        }
+        else if (!safeInstallRoot)
+        {
+            warnings.Add(
+                $"Install location '{PathTools.OneLine(identity.InstallLocation)}' is a broad shared directory; "
+                + "App Paths and startup matching was skipped.");
+        }
+
+        ScanAppPaths(identity, appStillInstalled: false, safeInstallRoot, findings, warnings, seen);
+        ScanStartupValues(identity, appStillInstalled: false, safeInstallRoot, findings, warnings, seen);
+
+        return new RegistryScanResult(
+            findings
+                .Select(finding => finding.Kind == FindingKind.UninstallEntry
+                    ? finding
+                    : finding with
+                    {
+                        Risk = FindingRisk.High,
+                        Reason = "Forced purge requested; this live registry setting will be deleted.",
+                    })
+                .OrderBy(finding => finding.Kind)
+                .ThenBy(finding => finding.Location.Code, StringComparer.Ordinal)
+                .ThenBy(finding => finding.Summary, StringComparer.CurrentCultureIgnoreCase)
+                .ToList(),
+            warnings,
+            AppStillInstalled: false);
+    }
+
     private static void ScanUninstallEntries(
         AppIdentity identity,
         bool safeInstallRoot,
